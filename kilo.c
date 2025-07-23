@@ -1,5 +1,7 @@
+#include <ctype.h>
 #include <err.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -8,6 +10,7 @@
 #include <string.h>
 #include <sys/ioccom.h>
 #include <sys/queue.h>
+#include <sys/stat.h>
 #include <sys/termios.h>
 #include <sys/ttycom.h>
 #include <termios.h>
@@ -16,6 +19,7 @@
 
 #define KILO_VERSION "0.0.1"
 #define KILO_TAB_STOP 8
+#define KILO_QUIT_TIMES 3
 
 struct editor_row {
   int size, render_size;
@@ -29,6 +33,7 @@ struct editor_config {
   int row_offset, col_offset;
   int screen_rows, screen_cols;
   int num_rows;
+  int dirty;
   char *file;
   char statusmsg[80];
   time_t statusmsg_time;
@@ -39,6 +44,7 @@ struct editor_config {
 static struct editor_config editor_config;
 
 enum editor_key {
+  BACKSPACE = 127,
   ARROW_LEFT = 1000,
   ARROW_RIGHT,
   ARROW_UP,
@@ -90,9 +96,21 @@ static int get_window_size(int *rows, int *cols);
 
 static int editor_row_cx_to_rx(struct editor_row *row, int cursor_x);
 static void editor_update_row(struct editor_row *row);
-static void editor_append_row(const char *s, size_t len);
+static void editor_insert_row(int at, const char *s, size_t len);
+static void editor_free_row(struct editor_row *row);
+static void editor_del_row(int at);
+static void editor_row_append_string(struct editor_row *, const char *, size_t);
+static void editor_row_insert_char(struct editor_row *row, int at, char c);
+static void editor_row_del_char(struct editor_row *row, int at);
 
+static void editor_insert_char(char c);
+static void editor_insert_newline(void);
+static void editor_del_char(void);
+
+static char *editor_rows_to_string(int *buflen);
 static void editor_open(const char *file);
+static void editor_save(void);
+static char *editor_prompt(const char *);
 static void editor_move_cursor(int key);
 static void editor_process_keypress(void);
 
@@ -244,6 +262,21 @@ static int get_cursor_position(int *rows, int *cols) {
   return (0);
 }
 
+static int get_window_size(int *rows, int *cols) {
+  struct winsize ws;
+
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
+    if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12)
+      return (-1);
+    return (get_cursor_position(rows, cols));
+  }
+
+  *cols = ws.ws_col;
+  *rows = ws.ws_row;
+
+  return (0);
+}
+
 static int editor_row_cx_to_rx(struct editor_row *row, int cursor_x) {
   int render_x = 0;
 
@@ -280,37 +313,143 @@ static void editor_update_row(struct editor_row *row) {
   row->render_size = i;
 }
 
-static void editor_append_row(const char *s, size_t len) {
-  int n = editor_config.num_rows;
+static void editor_insert_row(int at, const char *s, size_t len) {
+  if (at < 0 || at > editor_config.num_rows)
+    return;
 
   editor_config.rows =
-      realloc(editor_config.rows, sizeof(struct editor_config) * (n + 1));
+      realloc(editor_config.rows,
+              sizeof(struct editor_row) * (editor_config.num_rows + 1));
+  memmove(&editor_config.rows[at + 1], &editor_config.rows[at],
+          sizeof(struct editor_row) * (editor_config.num_rows - at));
 
-  editor_config.rows[n].size = len;
-  editor_config.rows[n].chars = malloc(len + 1);
-  memcpy(editor_config.rows[n].chars, s, len);
-  editor_config.rows[n].chars[len] = '\0';
+  editor_config.rows[at].size = len;
+  editor_config.rows[at].chars = malloc(len + 1);
+  memcpy(editor_config.rows[at].chars, s, len);
+  editor_config.rows[at].chars[len] = '\0';
 
-  editor_config.rows[n].render_size = 0;
-  editor_config.rows[n].render = NULL;
-  editor_update_row(&editor_config.rows[n]);
+  editor_config.rows[at].render_size = 0;
+  editor_config.rows[at].render = NULL;
+  editor_update_row(&editor_config.rows[at]);
 
   editor_config.num_rows++;
+  editor_config.dirty++;
 }
 
-static int get_window_size(int *rows, int *cols) {
-  struct winsize ws;
+static void editor_free_row(struct editor_row *row) {
+  free(row->render);
+  free(row->chars);
+}
 
-  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
-    if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12)
-      return (-1);
-    return (get_cursor_position(rows, cols));
+static void editor_del_row(int at) {
+  if (at < 0 || at >= editor_config.num_rows)
+    return;
+
+  editor_free_row(&editor_config.rows[at]);
+  memmove(&editor_config.rows[at], &editor_config.rows[at + 1],
+          sizeof(struct editor_row) * (editor_config.num_rows - at - 1));
+  editor_config.num_rows--;
+  editor_config.dirty++;
+}
+
+static void editor_row_append_string(struct editor_row *row, const char *s,
+                                     size_t len) {
+  row->chars = realloc(row->chars, row->size + len + 1);
+  memcpy(&row->chars[row->size], s, len);
+  row->size += len;
+  row->chars[row->size] = '\0';
+
+  editor_update_row(row);
+  editor_config.dirty++;
+}
+
+static void editor_row_insert_char(struct editor_row *row, int at, char c) {
+  if (at < 0 || at > row->size)
+    at = row->size;
+
+  row->chars = realloc(row->chars, row->size + 2);
+  memmove(&row->chars[at + 1], &row->chars[at], row->size - at + 1);
+  row->size++;
+  row->chars[at] = c;
+  editor_update_row(row);
+  editor_config.dirty++;
+}
+
+static void editor_row_del_char(struct editor_row *row, int at) {
+  if (at < 0 || at >= row->size)
+    return;
+  memmove(&row->chars[at], &row->chars[at + 1], row->size - at);
+  row->size--;
+  editor_update_row(row);
+  editor_config.dirty++;
+}
+
+static void editor_insert_char(char c) {
+  if (editor_config.cursor_y == editor_config.num_rows)
+    editor_insert_row(editor_config.num_rows, "", 0);
+
+  editor_row_insert_char(&editor_config.rows[editor_config.cursor_y],
+                         editor_config.cursor_x++, c);
+}
+
+static void editor_insert_newline(void) {
+  if (editor_config.cursor_x == 0) {
+    editor_insert_row(editor_config.cursor_y, "", 0);
+  } else {
+    struct editor_row *row = &editor_config.rows[editor_config.cursor_y];
+
+    editor_insert_row(editor_config.cursor_y + 1,
+                      &row->chars[editor_config.cursor_x],
+                      row->size - editor_config.cursor_x);
+    row = &editor_config.rows[editor_config.cursor_y];
+    row->size = editor_config.cursor_x;
+    row->chars[row->size] = '\0';
+    editor_update_row(row);
+  }
+  editor_config.cursor_y++;
+  editor_config.cursor_x = 0;
+}
+
+static void editor_del_char(void) {
+  if (editor_config.cursor_y == editor_config.num_rows)
+    return;
+
+  if (editor_config.cursor_x == 0 && editor_config.cursor_y == 0)
+    return;
+
+  if (editor_config.cursor_x > 0) {
+    editor_row_del_char(&editor_config.rows[editor_config.cursor_y],
+                        editor_config.cursor_x - 1);
+    editor_config.cursor_x--;
+  } else {
+    editor_config.cursor_x =
+        editor_config.rows[editor_config.cursor_y - 1].size;
+    editor_row_append_string(&editor_config.rows[editor_config.cursor_y - 1],
+                             editor_config.rows[editor_config.cursor_y].chars,
+                             editor_config.rows[editor_config.cursor_y].size);
+    editor_del_row(editor_config.cursor_y);
+    editor_config.cursor_y--;
+  }
+}
+
+static char *editor_rows_to_string(int *buflen) {
+  int total_len = 0;
+  char *buf;
+  char *p;
+
+  for (int i = 0; i < editor_config.num_rows; i++)
+    total_len += editor_config.rows[i].size + 1;
+
+  *buflen = total_len;
+  buf = malloc(total_len);
+  p = buf;
+  for (int i = 0; i < editor_config.num_rows; i++) {
+    memcpy(p, editor_config.rows[i].chars, editor_config.rows[i].size);
+    p += editor_config.rows[i].size;
+    *p++ = '\n';
   }
 
-  *cols = ws.ws_col;
-  *rows = ws.ws_row;
-
-  return (0);
+  return (buf);
 }
 
 static void editor_open(const char *file) {
@@ -328,11 +467,85 @@ static void editor_open(const char *file) {
     while (line_len > 0 &&
            (line[line_len - 1] == '\n' || line[line_len - 1] == '\r'))
       line_len--;
-    editor_append_row(line, line_len);
+    editor_insert_row(editor_config.num_rows, line, line_len);
   }
 
   free(line);
   fclose(fp);
+  editor_config.dirty = 0;
+}
+
+static void editor_save(void) {
+  int len;
+  int fd = -1;
+  char *buf = editor_rows_to_string(&len);
+
+  if (editor_config.file == NULL) {
+    editor_config.file = editor_prompt("Save as: %s");
+
+    if (editor_config.file == NULL) {
+      editor_set_status_message("Save aborted");
+      return;
+    }
+  }
+
+  fd = open(editor_config.file, O_RDWR | O_CREAT,
+            S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+
+  if (fd == -1) {
+    editor_set_status_message("Can't save! I/O error %s", strerror(errno));
+    goto cleanup;
+  }
+
+  if (ftruncate(fd, len) == -1) {
+    editor_set_status_message("Can't save! I/O error %s", strerror(errno));
+    goto cleanup;
+  }
+
+  if (write(fd, buf, len) != len) {
+    editor_set_status_message("Can't save! I/O error %s", strerror(errno));
+    goto cleanup;
+  }
+
+  editor_set_status_message("%d bytes written to disk", len);
+  editor_config.dirty = 0;
+
+cleanup:
+  close(fd);
+  free(buf);
+}
+
+static char *editor_prompt(const char *prompt) {
+  size_t size = 128, len = 0;
+  char *buf = malloc(size);
+
+  buf[0] = '\0';
+
+  for (;;) {
+    int c;
+
+    editor_set_status_message(prompt, buf);
+    editor_refresh_screen();
+
+    c = editor_read_key();
+    if ((c == DEL_KEY || c == CTRL('h') || c == BACKSPACE) && len != 0) {
+      buf[--len] = '\0';
+    } else if (c == '\x1b') {
+      editor_set_status_message("");
+      free(buf);
+      return (NULL);
+    } else if (c == '\r' && len != 0) {
+      editor_set_status_message("");
+      return (buf);
+    } else if (!iscntrl(c) && c < 128) {
+      if (len == size - 1) {
+        size *= 2;
+        buf = realloc(buf, size);
+      }
+      buf[len++] = c;
+      buf[len] = '\0';
+    }
+  }
 }
 
 static void editor_move_cursor(int key) {
@@ -378,13 +591,26 @@ static void editor_move_cursor(int key) {
 }
 
 static void editor_process_keypress(void) {
+  static int quit_times = KILO_QUIT_TIMES;
   int c = editor_read_key();
 
   switch (c) {
+  case '\r':
+    editor_insert_newline();
+    break;
   case CTRL('q'):
+    if (editor_config.dirty != 0 && quit_times > 0) {
+      editor_set_status_message("WARNING!!! File has unsaved changes. "
+                                "Press Ctrl-Q %d more times to quit.",
+                                quit_times--);
+      return;
+    }
     write(STDOUT_FILENO, "\x1b[2J", 4);
     write(STDOUT_FILENO, "\x1b[H", 4);
     exit(EXIT_SUCCESS);
+    break;
+  case CTRL('s'):
+    editor_save();
     break;
   case HOME_KEY:
     editor_config.cursor_x = 0;
@@ -392,6 +618,13 @@ static void editor_process_keypress(void) {
   case END_KEY:
     if (editor_config.cursor_y < editor_config.num_rows)
       editor_config.cursor_x = editor_config.rows[editor_config.cursor_y].size;
+    break;
+  case BACKSPACE:
+  case CTRL('h'):
+  case DEL_KEY:
+    if (c == DEL_KEY)
+      editor_move_cursor(ARROW_RIGHT);
+    editor_del_char();
     break;
   case PAGE_UP:
     editor_config.cursor_y = editor_config.row_offset;
@@ -413,7 +646,15 @@ static void editor_process_keypress(void) {
   case ARROW_RIGHT:
     editor_move_cursor(c);
     break;
+  case CTRL('l'):
+  case '\x1b':
+    break;
+  default:
+    editor_insert_char(c);
+    break;
   }
+
+  quit_times = KILO_QUIT_TIMES;
 }
 
 static void editor_refresh_screen(void) {
@@ -477,10 +718,10 @@ static void editor_scroll(void) {
 
 static void editor_draw_status_bar(struct append_buffer *ab) {
   char status[80], status_right[80];
-  int len =
-      snprintf(status, sizeof(status), "%.20s - %d lines",
-               editor_config.file == NULL ? "[No Name]" : editor_config.file,
-               editor_config.num_rows);
+  int len = snprintf(
+      status, sizeof(status), "%.20s - %d lines %s",
+      editor_config.file == NULL ? "[No Name]" : editor_config.file,
+      editor_config.num_rows, editor_config.dirty != 0 ? "(modified)" : "");
   int rlen = snprintf(status_right, sizeof(status_right), "%d/%d",
                       editor_config.cursor_y + 1, editor_config.num_rows);
 
@@ -566,6 +807,7 @@ static void init_editor(void) {
   editor_config.render_x = 0;
   editor_config.row_offset = editor_config.col_offset = 0;
   editor_config.num_rows = 0;
+  editor_config.dirty = 0;
   editor_config.rows = NULL;
   editor_config.file = NULL;
   editor_config.statusmsg[0] = '\0';
