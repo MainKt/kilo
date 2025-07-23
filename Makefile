@@ -1,5 +1,5 @@
 CWARNFLAGS= -Wall -Wextra -Wpedantic -Wshadow -g
-CFLAGS= -fsanitize=address,undefined
+CFLAGS= -std=c2x -fsanitize=address,undefined
 LDFLAGS+=	-fsanitize=address,undefined
 
 kilo: kilo.c
