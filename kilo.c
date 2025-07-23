@@ -41,7 +41,7 @@ struct editor_config {
   struct termios orignal_termios;
 };
 
-static struct editor_config editor_config;
+static struct editor_config editor;
 
 enum editor_key {
   BACKSPACE = 127,
@@ -149,19 +149,19 @@ static void die(const char *s) {
 }
 
 static void disable_raw_mode(void) {
-  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &editor_config.orignal_termios) == -1)
+  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &editor.orignal_termios) == -1)
     die("tcsetattr");
 }
 
 static void enable_raw_mode(void) {
   struct termios raw;
 
-  if (tcgetattr(STDIN_FILENO, &editor_config.orignal_termios) == -1)
+  if (tcgetattr(STDIN_FILENO, &editor.orignal_termios) == -1)
     die("tcgetattr");
 
   atexit(disable_raw_mode);
 
-  raw = editor_config.orignal_termios;
+  raw = editor.orignal_termios;
   raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
   raw.c_oflag &= ~(OPOST);
   raw.c_cflag |= CS8;
@@ -314,26 +314,26 @@ static void editor_update_row(struct editor_row *row) {
 }
 
 static void editor_insert_row(int at, const char *s, size_t len) {
-  if (at < 0 || at > editor_config.num_rows)
+  if (at < 0 || at > editor.num_rows)
     return;
 
-  editor_config.rows =
-      realloc(editor_config.rows,
-              sizeof(struct editor_row) * (editor_config.num_rows + 1));
-  memmove(&editor_config.rows[at + 1], &editor_config.rows[at],
-          sizeof(struct editor_row) * (editor_config.num_rows - at));
+  editor.rows =
+      realloc(editor.rows,
+              sizeof(struct editor_row) * (editor.num_rows + 1));
+  memmove(&editor.rows[at + 1], &editor.rows[at],
+          sizeof(struct editor_row) * (editor.num_rows - at));
 
-  editor_config.rows[at].size = len;
-  editor_config.rows[at].chars = malloc(len + 1);
-  memcpy(editor_config.rows[at].chars, s, len);
-  editor_config.rows[at].chars[len] = '\0';
+  editor.rows[at].size = len;
+  editor.rows[at].chars = malloc(len + 1);
+  memcpy(editor.rows[at].chars, s, len);
+  editor.rows[at].chars[len] = '\0';
 
-  editor_config.rows[at].render_size = 0;
-  editor_config.rows[at].render = NULL;
-  editor_update_row(&editor_config.rows[at]);
+  editor.rows[at].render_size = 0;
+  editor.rows[at].render = NULL;
+  editor_update_row(&editor.rows[at]);
 
-  editor_config.num_rows++;
-  editor_config.dirty++;
+  editor.num_rows++;
+  editor.dirty++;
 }
 
 static void editor_free_row(struct editor_row *row) {
@@ -342,14 +342,14 @@ static void editor_free_row(struct editor_row *row) {
 }
 
 static void editor_del_row(int at) {
-  if (at < 0 || at >= editor_config.num_rows)
+  if (at < 0 || at >= editor.num_rows)
     return;
 
-  editor_free_row(&editor_config.rows[at]);
-  memmove(&editor_config.rows[at], &editor_config.rows[at + 1],
-          sizeof(struct editor_row) * (editor_config.num_rows - at - 1));
-  editor_config.num_rows--;
-  editor_config.dirty++;
+  editor_free_row(&editor.rows[at]);
+  memmove(&editor.rows[at], &editor.rows[at + 1],
+          sizeof(struct editor_row) * (editor.num_rows - at - 1));
+  editor.num_rows--;
+  editor.dirty++;
 }
 
 static void editor_row_append_string(struct editor_row *row, const char *s,
@@ -360,7 +360,7 @@ static void editor_row_append_string(struct editor_row *row, const char *s,
   row->chars[row->size] = '\0';
 
   editor_update_row(row);
-  editor_config.dirty++;
+  editor.dirty++;
 }
 
 static void editor_row_insert_char(struct editor_row *row, int at, char c) {
@@ -372,7 +372,7 @@ static void editor_row_insert_char(struct editor_row *row, int at, char c) {
   row->size++;
   row->chars[at] = c;
   editor_update_row(row);
-  editor_config.dirty++;
+  editor.dirty++;
 }
 
 static void editor_row_del_char(struct editor_row *row, int at) {
@@ -381,54 +381,54 @@ static void editor_row_del_char(struct editor_row *row, int at) {
   memmove(&row->chars[at], &row->chars[at + 1], row->size - at);
   row->size--;
   editor_update_row(row);
-  editor_config.dirty++;
+  editor.dirty++;
 }
 
 static void editor_insert_char(char c) {
-  if (editor_config.cursor_y == editor_config.num_rows)
-    editor_insert_row(editor_config.num_rows, "", 0);
+  if (editor.cursor_y == editor.num_rows)
+    editor_insert_row(editor.num_rows, "", 0);
 
-  editor_row_insert_char(&editor_config.rows[editor_config.cursor_y],
-                         editor_config.cursor_x++, c);
+  editor_row_insert_char(&editor.rows[editor.cursor_y],
+                         editor.cursor_x++, c);
 }
 
 static void editor_insert_newline(void) {
-  if (editor_config.cursor_x == 0) {
-    editor_insert_row(editor_config.cursor_y, "", 0);
+  if (editor.cursor_x == 0) {
+    editor_insert_row(editor.cursor_y, "", 0);
   } else {
-    struct editor_row *row = &editor_config.rows[editor_config.cursor_y];
+    struct editor_row *row = &editor.rows[editor.cursor_y];
 
-    editor_insert_row(editor_config.cursor_y + 1,
-                      &row->chars[editor_config.cursor_x],
-                      row->size - editor_config.cursor_x);
-    row = &editor_config.rows[editor_config.cursor_y];
-    row->size = editor_config.cursor_x;
+    editor_insert_row(editor.cursor_y + 1,
+                      &row->chars[editor.cursor_x],
+                      row->size - editor.cursor_x);
+    row = &editor.rows[editor.cursor_y];
+    row->size = editor.cursor_x;
     row->chars[row->size] = '\0';
     editor_update_row(row);
   }
-  editor_config.cursor_y++;
-  editor_config.cursor_x = 0;
+  editor.cursor_y++;
+  editor.cursor_x = 0;
 }
 
 static void editor_del_char(void) {
-  if (editor_config.cursor_y == editor_config.num_rows)
+  if (editor.cursor_y == editor.num_rows)
     return;
 
-  if (editor_config.cursor_x == 0 && editor_config.cursor_y == 0)
+  if (editor.cursor_x == 0 && editor.cursor_y == 0)
     return;
 
-  if (editor_config.cursor_x > 0) {
-    editor_row_del_char(&editor_config.rows[editor_config.cursor_y],
-                        editor_config.cursor_x - 1);
-    editor_config.cursor_x--;
+  if (editor.cursor_x > 0) {
+    editor_row_del_char(&editor.rows[editor.cursor_y],
+                        editor.cursor_x - 1);
+    editor.cursor_x--;
   } else {
-    editor_config.cursor_x =
-        editor_config.rows[editor_config.cursor_y - 1].size;
-    editor_row_append_string(&editor_config.rows[editor_config.cursor_y - 1],
-                             editor_config.rows[editor_config.cursor_y].chars,
-                             editor_config.rows[editor_config.cursor_y].size);
-    editor_del_row(editor_config.cursor_y);
-    editor_config.cursor_y--;
+    editor.cursor_x =
+        editor.rows[editor.cursor_y - 1].size;
+    editor_row_append_string(&editor.rows[editor.cursor_y - 1],
+                             editor.rows[editor.cursor_y].chars,
+                             editor.rows[editor.cursor_y].size);
+    editor_del_row(editor.cursor_y);
+    editor.cursor_y--;
   }
 }
 
@@ -437,15 +437,15 @@ static char *editor_rows_to_string(int *buflen) {
   char *buf;
   char *p;
 
-  for (int i = 0; i < editor_config.num_rows; i++)
-    total_len += editor_config.rows[i].size + 1;
+  for (int i = 0; i < editor.num_rows; i++)
+    total_len += editor.rows[i].size + 1;
 
   *buflen = total_len;
   buf = malloc(total_len);
   p = buf;
-  for (int i = 0; i < editor_config.num_rows; i++) {
-    memcpy(p, editor_config.rows[i].chars, editor_config.rows[i].size);
-    p += editor_config.rows[i].size;
+  for (int i = 0; i < editor.num_rows; i++) {
+    memcpy(p, editor.rows[i].chars, editor.rows[i].size);
+    p += editor.rows[i].size;
     *p++ = '\n';
   }
 
@@ -461,18 +461,18 @@ static void editor_open(const char *file) {
   if (fp == NULL)
     die("fopen");
 
-  editor_config.file = strdup(file);
+  editor.file = strdup(file);
 
   while ((line_len = getline(&line, &line_cap, fp)) != -1) {
     while (line_len > 0 &&
            (line[line_len - 1] == '\n' || line[line_len - 1] == '\r'))
       line_len--;
-    editor_insert_row(editor_config.num_rows, line, line_len);
+    editor_insert_row(editor.num_rows, line, line_len);
   }
 
   free(line);
   fclose(fp);
-  editor_config.dirty = 0;
+  editor.dirty = 0;
 }
 
 static void editor_save(void) {
@@ -480,16 +480,16 @@ static void editor_save(void) {
   int fd = -1;
   char *buf = editor_rows_to_string(&len);
 
-  if (editor_config.file == NULL) {
-    editor_config.file = editor_prompt("Save as: %s");
+  if (editor.file == NULL) {
+    editor.file = editor_prompt("Save as: %s");
 
-    if (editor_config.file == NULL) {
+    if (editor.file == NULL) {
       editor_set_status_message("Save aborted");
       return;
     }
   }
 
-  fd = open(editor_config.file, O_RDWR | O_CREAT,
+  fd = open(editor.file, O_RDWR | O_CREAT,
             S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 
   if (fd == -1) {
@@ -508,7 +508,7 @@ static void editor_save(void) {
   }
 
   editor_set_status_message("%d bytes written to disk", len);
-  editor_config.dirty = 0;
+  editor.dirty = 0;
 
 cleanup:
   close(fd);
@@ -549,45 +549,45 @@ static char *editor_prompt(const char *prompt) {
 }
 
 static void editor_move_cursor(int key) {
-  struct editor_row *row = editor_config.cursor_y >= editor_config.num_rows
+  struct editor_row *row = editor.cursor_y >= editor.num_rows
                                ? NULL
-                               : &editor_config.rows[editor_config.cursor_y];
+                               : &editor.rows[editor.cursor_y];
   int row_len;
 
   switch (key) {
   case ARROW_LEFT:
-    if (editor_config.cursor_x != 0)
-      editor_config.cursor_x--;
-    else if (editor_config.cursor_y > 0)
-      editor_config.cursor_x =
-          editor_config.rows[--editor_config.cursor_y].size;
+    if (editor.cursor_x != 0)
+      editor.cursor_x--;
+    else if (editor.cursor_y > 0)
+      editor.cursor_x =
+          editor.rows[--editor.cursor_y].size;
     break;
   case ARROW_RIGHT:
     if (row != NULL) {
-      if (editor_config.cursor_x < row->size)
-        editor_config.cursor_x++;
-      else if (editor_config.cursor_x == row->size) {
-        editor_config.cursor_x = 0;
-        editor_config.cursor_y++;
+      if (editor.cursor_x < row->size)
+        editor.cursor_x++;
+      else if (editor.cursor_x == row->size) {
+        editor.cursor_x = 0;
+        editor.cursor_y++;
       }
     }
     break;
   case ARROW_UP:
-    if (editor_config.cursor_y != 0)
-      editor_config.cursor_y--;
+    if (editor.cursor_y != 0)
+      editor.cursor_y--;
     break;
   case ARROW_DOWN:
-    if (editor_config.cursor_y < editor_config.num_rows)
-      editor_config.cursor_y++;
+    if (editor.cursor_y < editor.num_rows)
+      editor.cursor_y++;
     break;
   }
 
-  row = editor_config.cursor_y >= editor_config.num_rows
+  row = editor.cursor_y >= editor.num_rows
             ? NULL
-            : &editor_config.rows[editor_config.cursor_y];
+            : &editor.rows[editor.cursor_y];
   row_len = row == NULL ? 0 : row->size;
-  if (editor_config.cursor_x > row_len)
-    editor_config.cursor_x = row_len;
+  if (editor.cursor_x > row_len)
+    editor.cursor_x = row_len;
 }
 
 static void editor_process_keypress(void) {
@@ -599,7 +599,7 @@ static void editor_process_keypress(void) {
     editor_insert_newline();
     break;
   case CTRL('q'):
-    if (editor_config.dirty != 0 && quit_times > 0) {
+    if (editor.dirty != 0 && quit_times > 0) {
       editor_set_status_message("WARNING!!! File has unsaved changes. "
                                 "Press Ctrl-Q %d more times to quit.",
                                 quit_times--);
@@ -613,11 +613,11 @@ static void editor_process_keypress(void) {
     editor_save();
     break;
   case HOME_KEY:
-    editor_config.cursor_x = 0;
+    editor.cursor_x = 0;
     break;
   case END_KEY:
-    if (editor_config.cursor_y < editor_config.num_rows)
-      editor_config.cursor_x = editor_config.rows[editor_config.cursor_y].size;
+    if (editor.cursor_y < editor.num_rows)
+      editor.cursor_x = editor.rows[editor.cursor_y].size;
     break;
   case BACKSPACE:
   case CTRL('h'):
@@ -627,17 +627,17 @@ static void editor_process_keypress(void) {
     editor_del_char();
     break;
   case PAGE_UP:
-    editor_config.cursor_y = editor_config.row_offset;
-    for (int i = 0; i < editor_config.screen_rows; i++)
+    editor.cursor_y = editor.row_offset;
+    for (int i = 0; i < editor.screen_rows; i++)
       editor_move_cursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
     break;
   case PAGE_DOWN:
-    editor_config.cursor_y =
-        editor_config.row_offset + editor_config.screen_rows - 1;
-    if (editor_config.cursor_y > editor_config.num_rows)
-      editor_config.cursor_y = editor_config.num_rows;
+    editor.cursor_y =
+        editor.row_offset + editor.screen_rows - 1;
+    if (editor.cursor_y > editor.num_rows)
+      editor.cursor_y = editor.num_rows;
 
-    for (int i = 0; i < editor_config.screen_rows; i++)
+    for (int i = 0; i < editor.screen_rows; i++)
       editor_move_cursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
     break;
   case ARROW_UP:
@@ -672,8 +672,8 @@ static void editor_refresh_screen(void) {
   editor_draw_message_bar(&ab);
 
   snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
-           editor_config.cursor_y - editor_config.row_offset + 1,
-           editor_config.render_x - editor_config.col_offset + 1);
+           editor.cursor_y - editor.row_offset + 1,
+           editor.render_x - editor.col_offset + 1);
   AB_APPEND(&ab, buf, strlen(buf));
 
   AB_APPEND(&ab, "\x1b[?25h", 6);
@@ -687,52 +687,52 @@ static void editor_set_status_message(const char *fmt, ...) {
   va_list ap;
 
   va_start(ap, fmt);
-  vsnprintf(editor_config.statusmsg, sizeof(editor_config.statusmsg), fmt, ap);
+  vsnprintf(editor.statusmsg, sizeof(editor.statusmsg), fmt, ap);
   va_end(ap);
 
-  editor_config.statusmsg_time = time(NULL);
+  editor.statusmsg_time = time(NULL);
 }
 
 static void editor_scroll(void) {
-  editor_config.render_x = 0;
-  if (editor_config.cursor_y < editor_config.num_rows)
-    editor_config.render_x = editor_row_cx_to_rx(
-        &editor_config.rows[editor_config.cursor_y], editor_config.cursor_x);
+  editor.render_x = 0;
+  if (editor.cursor_y < editor.num_rows)
+    editor.render_x = editor_row_cx_to_rx(
+        &editor.rows[editor.cursor_y], editor.cursor_x);
 
-  if (editor_config.cursor_y < editor_config.row_offset)
-    editor_config.row_offset = editor_config.cursor_y;
+  if (editor.cursor_y < editor.row_offset)
+    editor.row_offset = editor.cursor_y;
 
-  if (editor_config.cursor_y >=
-      editor_config.row_offset + editor_config.screen_rows)
-    editor_config.row_offset =
-        editor_config.cursor_y - editor_config.screen_rows + 1;
+  if (editor.cursor_y >=
+      editor.row_offset + editor.screen_rows)
+    editor.row_offset =
+        editor.cursor_y - editor.screen_rows + 1;
 
-  if (editor_config.render_x < editor_config.col_offset)
-    editor_config.col_offset = editor_config.render_x;
+  if (editor.render_x < editor.col_offset)
+    editor.col_offset = editor.render_x;
 
-  if (editor_config.render_x >=
-      editor_config.col_offset + editor_config.screen_cols)
-    editor_config.col_offset =
-        editor_config.render_x - editor_config.screen_cols + 1;
+  if (editor.render_x >=
+      editor.col_offset + editor.screen_cols)
+    editor.col_offset =
+        editor.render_x - editor.screen_cols + 1;
 }
 
 static void editor_draw_status_bar(struct append_buffer *ab) {
   char status[80], status_right[80];
   int len = snprintf(
       status, sizeof(status), "%.20s - %d lines %s",
-      editor_config.file == NULL ? "[No Name]" : editor_config.file,
-      editor_config.num_rows, editor_config.dirty != 0 ? "(modified)" : "");
+      editor.file == NULL ? "[No Name]" : editor.file,
+      editor.num_rows, editor.dirty != 0 ? "(modified)" : "");
   int rlen = snprintf(status_right, sizeof(status_right), "%d/%d",
-                      editor_config.cursor_y + 1, editor_config.num_rows);
+                      editor.cursor_y + 1, editor.num_rows);
 
-  if (len > editor_config.screen_cols)
-    len = editor_config.screen_cols;
+  if (len > editor.screen_cols)
+    len = editor.screen_cols;
 
   AB_APPEND(ab, "\x1b[7m", 4);
   AB_APPEND(ab, status, len);
 
-  while (len < editor_config.screen_cols) {
-    if (editor_config.screen_cols - len == rlen) {
+  while (len < editor.screen_cols) {
+    if (editor.screen_cols - len == rlen) {
       AB_APPEND(ab, status_right, rlen);
       break;
     }
@@ -746,31 +746,31 @@ static void editor_draw_status_bar(struct append_buffer *ab) {
 }
 
 static void editor_draw_message_bar(struct append_buffer *ab) {
-  int msg_len = strlen(editor_config.statusmsg);
+  int msg_len = strlen(editor.statusmsg);
 
   AB_APPEND(ab, "\x1b[K", 3);
 
-  if (msg_len > editor_config.screen_cols)
-    msg_len = editor_config.screen_cols;
+  if (msg_len > editor.screen_cols)
+    msg_len = editor.screen_cols;
 
-  if (msg_len != 0 && time(NULL) - editor_config.statusmsg_time < 5)
-    AB_APPEND(ab, editor_config.statusmsg, msg_len);
+  if (msg_len != 0 && time(NULL) - editor.statusmsg_time < 5)
+    AB_APPEND(ab, editor.statusmsg, msg_len);
 }
 
 static void editor_draw_rows(struct append_buffer *ab) {
-  for (int y = 0; y < editor_config.screen_rows; y++) {
-    int file_row = y + editor_config.row_offset;
-    if (file_row >= editor_config.num_rows) {
-      if (editor_config.num_rows == 0 && y == editor_config.screen_rows / 3) {
+  for (int y = 0; y < editor.screen_rows; y++) {
+    int file_row = y + editor.row_offset;
+    if (file_row >= editor.num_rows) {
+      if (editor.num_rows == 0 && y == editor.screen_rows / 3) {
         char welcome[80];
         int padding;
         int welcome_len = snprintf(welcome, sizeof(welcome),
                                    "Kilo editor -- version %s", KILO_VERSION);
 
-        if (welcome_len > editor_config.screen_cols)
-          welcome_len = editor_config.screen_cols;
+        if (welcome_len > editor.screen_cols)
+          welcome_len = editor.screen_cols;
 
-        padding = (editor_config.screen_cols - welcome_len) / 2;
+        padding = (editor.screen_cols - welcome_len) / 2;
         if (padding != 0) {
           AB_APPEND(ab, "~", 1);
           padding--;
@@ -784,16 +784,16 @@ static void editor_draw_rows(struct append_buffer *ab) {
         AB_APPEND(ab, "~", 1);
     } else {
       int len =
-          editor_config.rows[file_row].render_size - editor_config.col_offset;
+          editor.rows[file_row].render_size - editor.col_offset;
 
       if (len < 0)
         len = 0;
 
-      if (len > editor_config.screen_cols)
-        len = editor_config.screen_cols;
+      if (len > editor.screen_cols)
+        len = editor.screen_cols;
 
       AB_APPEND(ab,
-                &editor_config.rows[file_row].render[editor_config.col_offset],
+                &editor.rows[file_row].render[editor.col_offset],
                 len);
     }
 
@@ -803,19 +803,19 @@ static void editor_draw_rows(struct append_buffer *ab) {
 }
 
 static void init_editor(void) {
-  editor_config.cursor_x = editor_config.cursor_y = 0;
-  editor_config.render_x = 0;
-  editor_config.row_offset = editor_config.col_offset = 0;
-  editor_config.num_rows = 0;
-  editor_config.dirty = 0;
-  editor_config.rows = NULL;
-  editor_config.file = NULL;
-  editor_config.statusmsg[0] = '\0';
-  editor_config.statusmsg_time = 0;
+  editor.cursor_x = editor.cursor_y = 0;
+  editor.render_x = 0;
+  editor.row_offset = editor.col_offset = 0;
+  editor.num_rows = 0;
+  editor.dirty = 0;
+  editor.rows = NULL;
+  editor.file = NULL;
+  editor.statusmsg[0] = '\0';
+  editor.statusmsg_time = 0;
 
-  if (get_window_size(&editor_config.screen_rows, &editor_config.screen_cols) ==
+  if (get_window_size(&editor.screen_rows, &editor.screen_cols) ==
       -1)
     die("get_window_size");
 
-  editor_config.screen_rows -= 2;
+  editor.screen_rows -= 2;
 }
