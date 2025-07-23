@@ -95,6 +95,7 @@ static int get_cursor_position(int *rows, int *cols);
 static int get_window_size(int *rows, int *cols);
 
 static int editor_row_cx_to_rx(struct editor_row *row, int cursor_x);
+static int editor_row_rx_to_cx(struct editor_row *row, int render_x);
 static void editor_update_row(struct editor_row *row);
 static void editor_insert_row(int at, const char *s, size_t len);
 static void editor_free_row(struct editor_row *row);
@@ -110,7 +111,9 @@ static void editor_del_char(void);
 static char *editor_rows_to_string(int *buflen);
 static void editor_open(const char *file);
 static void editor_save(void);
-static char *editor_prompt(const char *);
+static void editor_find(void);
+static void editor_find_callback(const char *, int);
+static char *editor_prompt(const char *, void (*)(const char *, int));
 static void editor_move_cursor(int key);
 static void editor_process_keypress(void);
 
@@ -130,7 +133,8 @@ int main(int argc, char *argv[]) {
   if (argc >= 2)
     editor_open(argv[1]);
 
-  editor_set_status_message("HELP: CTRL-Q = quit");
+  editor_set_status_message(
+      "HELP: CTRL-S = save | CTRL-Q = quit | CTRL-F = find");
 
   for (;;) {
     editor_refresh_screen();
@@ -289,6 +293,24 @@ static int editor_row_cx_to_rx(struct editor_row *row, int cursor_x) {
   return (render_x);
 }
 
+static int editor_row_rx_to_cx(struct editor_row *row, int render_x) {
+  int cursor_x = 0, current_render_x = 0;
+
+  while (cursor_x < row->size) {
+    if (row->chars[cursor_x] == '\t')
+      current_render_x +=
+          (KILO_TAB_STOP - 1) - (current_render_x % KILO_TAB_STOP);
+    current_render_x++;
+
+    if (current_render_x > render_x)
+      return (cursor_x);
+
+    cursor_x++;
+  }
+
+  return (cursor_x);
+}
+
 static void editor_update_row(struct editor_row *row) {
   int i = 0, tabs = 0;
 
@@ -318,8 +340,7 @@ static void editor_insert_row(int at, const char *s, size_t len) {
     return;
 
   editor.rows =
-      realloc(editor.rows,
-              sizeof(struct editor_row) * (editor.num_rows + 1));
+      realloc(editor.rows, sizeof(struct editor_row) * (editor.num_rows + 1));
   memmove(&editor.rows[at + 1], &editor.rows[at],
           sizeof(struct editor_row) * (editor.num_rows - at));
 
@@ -388,8 +409,7 @@ static void editor_insert_char(char c) {
   if (editor.cursor_y == editor.num_rows)
     editor_insert_row(editor.num_rows, "", 0);
 
-  editor_row_insert_char(&editor.rows[editor.cursor_y],
-                         editor.cursor_x++, c);
+  editor_row_insert_char(&editor.rows[editor.cursor_y], editor.cursor_x++, c);
 }
 
 static void editor_insert_newline(void) {
@@ -398,8 +418,7 @@ static void editor_insert_newline(void) {
   } else {
     struct editor_row *row = &editor.rows[editor.cursor_y];
 
-    editor_insert_row(editor.cursor_y + 1,
-                      &row->chars[editor.cursor_x],
+    editor_insert_row(editor.cursor_y + 1, &row->chars[editor.cursor_x],
                       row->size - editor.cursor_x);
     row = &editor.rows[editor.cursor_y];
     row->size = editor.cursor_x;
@@ -418,12 +437,10 @@ static void editor_del_char(void) {
     return;
 
   if (editor.cursor_x > 0) {
-    editor_row_del_char(&editor.rows[editor.cursor_y],
-                        editor.cursor_x - 1);
+    editor_row_del_char(&editor.rows[editor.cursor_y], editor.cursor_x - 1);
     editor.cursor_x--;
   } else {
-    editor.cursor_x =
-        editor.rows[editor.cursor_y - 1].size;
+    editor.cursor_x = editor.rows[editor.cursor_y - 1].size;
     editor_row_append_string(&editor.rows[editor.cursor_y - 1],
                              editor.rows[editor.cursor_y].chars,
                              editor.rows[editor.cursor_y].size);
@@ -481,7 +498,7 @@ static void editor_save(void) {
   char *buf = editor_rows_to_string(&len);
 
   if (editor.file == NULL) {
-    editor.file = editor_prompt("Save as: %s");
+    editor.file = editor_prompt("Save as: %s", NULL);
 
     if (editor.file == NULL) {
       editor_set_status_message("Save aborted");
@@ -515,7 +532,70 @@ cleanup:
   free(buf);
 }
 
-static char *editor_prompt(const char *prompt) {
+static void editor_find(void) {
+  int save_cursor_x = editor.cursor_x;
+  int save_cursor_y = editor.cursor_y;
+  int saved_col_offset = editor.col_offset;
+  int saved_row_offset = editor.row_offset;
+
+  char *query =
+      editor_prompt("Search: %s (Use ESC/Arrows/Enter)", editor_find_callback);
+
+  if (query == NULL) {
+    editor.cursor_x = save_cursor_x;
+    editor.cursor_y = save_cursor_y;
+    editor.col_offset = saved_col_offset;
+    editor.row_offset = saved_row_offset;
+  } else
+    free(query);
+}
+
+static void editor_find_callback(const char *query, int key) {
+  static int last_match = -1;
+  static int direction = 1;
+
+  if (key == '\r' || key == '\x1b') {
+    last_match = -1;
+    direction = 1;
+    return;
+  } else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
+    direction = 1;
+  } else if (key == ARROW_LEFT || key == ARROW_UP) {
+    direction = -1;
+  } else {
+    last_match = -1;
+    direction = 1;
+  }
+
+  if (last_match == -1)
+    direction = 1;
+
+  for (int i = 0, current = last_match + direction; i < editor.num_rows;
+       i++, current += direction) {
+    struct editor_row *row;
+    char *match;
+
+    if (current == -1)
+      current = editor.num_rows - 1;
+
+    if (current == editor.num_rows)
+      current = 0;
+
+    row = &editor.rows[current];
+    match = strstr(row->render, query);
+
+    if (match != NULL) {
+      last_match = current;
+      editor.cursor_y = current;
+      editor.cursor_x = editor_row_rx_to_cx(row, match - row->render);
+      editor.row_offset = editor.num_rows;
+      break;
+    }
+  }
+}
+
+static char *editor_prompt(const char *prompt,
+                           void (*callback)(const char *, int)) {
   size_t size = 128, len = 0;
   char *buf = malloc(size);
 
@@ -532,10 +612,14 @@ static char *editor_prompt(const char *prompt) {
       buf[--len] = '\0';
     } else if (c == '\x1b') {
       editor_set_status_message("");
+      if (callback != NULL)
+        callback(buf, c);
       free(buf);
       return (NULL);
     } else if (c == '\r' && len != 0) {
       editor_set_status_message("");
+      if (callback != NULL)
+        callback(buf, c);
       return (buf);
     } else if (!iscntrl(c) && c < 128) {
       if (len == size - 1) {
@@ -545,13 +629,15 @@ static char *editor_prompt(const char *prompt) {
       buf[len++] = c;
       buf[len] = '\0';
     }
+
+    if (callback != NULL)
+      callback(buf, c);
   }
 }
 
 static void editor_move_cursor(int key) {
-  struct editor_row *row = editor.cursor_y >= editor.num_rows
-                               ? NULL
-                               : &editor.rows[editor.cursor_y];
+  struct editor_row *row =
+      editor.cursor_y >= editor.num_rows ? NULL : &editor.rows[editor.cursor_y];
   int row_len;
 
   switch (key) {
@@ -559,8 +645,7 @@ static void editor_move_cursor(int key) {
     if (editor.cursor_x != 0)
       editor.cursor_x--;
     else if (editor.cursor_y > 0)
-      editor.cursor_x =
-          editor.rows[--editor.cursor_y].size;
+      editor.cursor_x = editor.rows[--editor.cursor_y].size;
     break;
   case ARROW_RIGHT:
     if (row != NULL) {
@@ -582,9 +667,8 @@ static void editor_move_cursor(int key) {
     break;
   }
 
-  row = editor.cursor_y >= editor.num_rows
-            ? NULL
-            : &editor.rows[editor.cursor_y];
+  row =
+      editor.cursor_y >= editor.num_rows ? NULL : &editor.rows[editor.cursor_y];
   row_len = row == NULL ? 0 : row->size;
   if (editor.cursor_x > row_len)
     editor.cursor_x = row_len;
@@ -619,6 +703,9 @@ static void editor_process_keypress(void) {
     if (editor.cursor_y < editor.num_rows)
       editor.cursor_x = editor.rows[editor.cursor_y].size;
     break;
+  case CTRL('f'):
+    editor_find();
+    break;
   case BACKSPACE:
   case CTRL('h'):
   case DEL_KEY:
@@ -632,8 +719,7 @@ static void editor_process_keypress(void) {
       editor_move_cursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
     break;
   case PAGE_DOWN:
-    editor.cursor_y =
-        editor.row_offset + editor.screen_rows - 1;
+    editor.cursor_y = editor.row_offset + editor.screen_rows - 1;
     if (editor.cursor_y > editor.num_rows)
       editor.cursor_y = editor.num_rows;
 
@@ -696,32 +782,27 @@ static void editor_set_status_message(const char *fmt, ...) {
 static void editor_scroll(void) {
   editor.render_x = 0;
   if (editor.cursor_y < editor.num_rows)
-    editor.render_x = editor_row_cx_to_rx(
-        &editor.rows[editor.cursor_y], editor.cursor_x);
+    editor.render_x =
+        editor_row_cx_to_rx(&editor.rows[editor.cursor_y], editor.cursor_x);
 
   if (editor.cursor_y < editor.row_offset)
     editor.row_offset = editor.cursor_y;
 
-  if (editor.cursor_y >=
-      editor.row_offset + editor.screen_rows)
-    editor.row_offset =
-        editor.cursor_y - editor.screen_rows + 1;
+  if (editor.cursor_y >= editor.row_offset + editor.screen_rows)
+    editor.row_offset = editor.cursor_y - editor.screen_rows + 1;
 
   if (editor.render_x < editor.col_offset)
     editor.col_offset = editor.render_x;
 
-  if (editor.render_x >=
-      editor.col_offset + editor.screen_cols)
-    editor.col_offset =
-        editor.render_x - editor.screen_cols + 1;
+  if (editor.render_x >= editor.col_offset + editor.screen_cols)
+    editor.col_offset = editor.render_x - editor.screen_cols + 1;
 }
 
 static void editor_draw_status_bar(struct append_buffer *ab) {
   char status[80], status_right[80];
-  int len = snprintf(
-      status, sizeof(status), "%.20s - %d lines %s",
-      editor.file == NULL ? "[No Name]" : editor.file,
-      editor.num_rows, editor.dirty != 0 ? "(modified)" : "");
+  int len = snprintf(status, sizeof(status), "%.20s - %d lines %s",
+                     editor.file == NULL ? "[No Name]" : editor.file,
+                     editor.num_rows, editor.dirty != 0 ? "(modified)" : "");
   int rlen = snprintf(status_right, sizeof(status_right), "%d/%d",
                       editor.cursor_y + 1, editor.num_rows);
 
@@ -783,8 +864,7 @@ static void editor_draw_rows(struct append_buffer *ab) {
       } else
         AB_APPEND(ab, "~", 1);
     } else {
-      int len =
-          editor.rows[file_row].render_size - editor.col_offset;
+      int len = editor.rows[file_row].render_size - editor.col_offset;
 
       if (len < 0)
         len = 0;
@@ -792,9 +872,7 @@ static void editor_draw_rows(struct append_buffer *ab) {
       if (len > editor.screen_cols)
         len = editor.screen_cols;
 
-      AB_APPEND(ab,
-                &editor.rows[file_row].render[editor.col_offset],
-                len);
+      AB_APPEND(ab, &editor.rows[file_row].render[editor.col_offset], len);
     }
 
     AB_APPEND(ab, "\x1b[K", 3);
@@ -813,8 +891,7 @@ static void init_editor(void) {
   editor.statusmsg[0] = '\0';
   editor.statusmsg_time = 0;
 
-  if (get_window_size(&editor.screen_rows, &editor.screen_cols) ==
-      -1)
+  if (get_window_size(&editor.screen_rows, &editor.screen_cols) == -1)
     die("get_window_size");
 
   editor.screen_rows -= 2;
