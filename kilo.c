@@ -712,12 +712,12 @@ static void editor_open(const char *file) {
   char *line = NULL;
   FILE *fp = fopen(file, "r");
 
-  editor_select_syntax_highlight();
-
   if (fp == NULL)
     die("fopen");
 
   editor.file = strdup(file);
+
+  editor_select_syntax_highlight();
 
   while ((line_len = getline(&line, &line_cap, fp)) != -1) {
     while (line_len > 0 &&
