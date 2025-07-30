@@ -19,6 +19,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "ctrl_seq.h"
+
 #define KILO_VERSION "0.0.1"
 #define KILO_TAB_STOP 8
 #define KILO_QUIT_TIMES 3
@@ -180,8 +182,7 @@ int main(int argc, char *argv[]) {
 }
 
 static void die(const char *fmt, ...) {
-  write(STDOUT_FILENO, "\x1b[2J", 4);
-  write(STDOUT_FILENO, "\x1b[H", 4);
+  dprintf(STDOUT_FILENO, ERASE_IN_DISPLAY(ERASE_ENTIRE) CURSOR_MOVE(0, 0));
 
   va_list ap;
   va_start(ap, fmt);
@@ -224,18 +225,18 @@ static int editor_read_key(void) {
       die("read");
   }
 
-  if (c == '\x1b') {
+  if (c == ESC_CHAR) {
     char seq[3];
 
     if (read(STDIN_FILENO, &seq[0], 1) != 1)
-      return ('\x1b');
+      return (ESC_CHAR);
     if (read(STDIN_FILENO, &seq[1], 1) != 1)
-      return ('\x1b');
+      return (ESC_CHAR);
 
     if (seq[0] == '[') {
       if (seq[1] >= '0' && seq[1] <= '9') {
         if (read(STDIN_FILENO, &seq[2], 1) != 1)
-          return ('\x1b');
+          return (ESC_CHAR);
 
         if (seq[2] == '~') {
           switch (seq[1]) {
@@ -280,7 +281,7 @@ static int editor_read_key(void) {
       }
     }
 
-    return ('\x1b');
+    return (ESC_CHAR);
   }
 
   return (c);
@@ -289,7 +290,7 @@ static int editor_read_key(void) {
 static int get_cursor_position(int *rows, int *cols) {
   char buf[32] = "";
 
-  if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4)
+  if (dprintf(STDOUT_FILENO, CURSOR_POS) < 0)
     return (-1);
 
   for (size_t i = 0; i < sizeof(buf) - 1; i++) {
@@ -297,7 +298,7 @@ static int get_cursor_position(int *rows, int *cols) {
       break;
   }
 
-  if (buf[0] != '\x1b' || buf[1] != '[' ||
+  if (buf[0] != CSI[0] || buf[1] != CSI[1] ||
       sscanf(&buf[2], "%d;%d", rows, cols) != 2)
     return (-1);
 
@@ -308,7 +309,7 @@ static int get_window_size(int *rows, int *cols) {
   struct winsize ws;
 
   if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
-    if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12)
+    if (dprintf(STDOUT_FILENO, CURSOR_FORWARD(999) CURSOR_DOWN(999)) < 0)
       return (-1);
     return (get_cursor_position(rows, cols));
   }
@@ -793,7 +794,7 @@ static void editor_find_callback(const char *query, int key) {
     saved_hl = NULL;
   }
 
-  if (key == '\r' || key == '\x1b') {
+  if (key == '\r' || key == ESC_CHAR) {
     last_match = -1;
     direction = 1;
     return;
@@ -856,7 +857,7 @@ static char *editor_prompt(const char *prompt,
     c = editor_read_key();
     if ((c == DEL_KEY || c == CTRL('h') || c == BACKSPACE) && len != 0) {
       buf[--len] = '\0';
-    } else if (c == '\x1b') {
+    } else if (c == ESC_CHAR) {
       editor_set_status_message("");
       if (callback != NULL)
         callback(buf, c);
@@ -935,8 +936,7 @@ static void editor_process_keypress(void) {
                                 quit_times--);
       return;
     }
-    write(STDOUT_FILENO, "\x1b[2J", 4);
-    write(STDOUT_FILENO, "\x1b[H", 4);
+    dprintf(STDOUT_FILENO, ERASE_IN_DISPLAY(ERASE_ENTIRE) CURSOR_MOVE(0, 0));
     exit(EXIT_SUCCESS);
     break;
   case CTRL('s'):
@@ -979,7 +979,7 @@ static void editor_process_keypress(void) {
     editor_move_cursor(c);
     break;
   case CTRL('l'):
-  case '\x1b':
+  case ESC_CHAR:
     break;
   default:
     editor_insert_char(c);
@@ -994,17 +994,17 @@ static void editor_refresh_screen(void) {
 
   editor_scroll();
 
-  sbuf_cat(sb, "\x1b[?25l");
-  sbuf_cat(sb, "\x1b[H");
+  sbuf_cat(sb, CURSOR_HIDE);
+  sbuf_cat(sb, CURSOR_MOVE(0, 0));
 
   editor_draw_rows(sb);
   editor_draw_status_bar(sb);
   editor_draw_message_bar(sb);
 
-  sbuf_printf(sb, "\x1b[%d;%dH", editor.cursor_y - editor.row_offset + 1,
+  sbuf_printf(sb, CURSOR_MOVE_FMT, editor.cursor_y - editor.row_offset + 1,
               editor.render_x - editor.col_offset + 1);
 
-  sbuf_cat(sb, "\x1b[?25h");
+  sbuf_cat(sb, CURSOR_SHOW);
 
   write(STDOUT_FILENO, sbuf_data(sb), sbuf_len(sb));
 
@@ -1053,7 +1053,7 @@ static void editor_draw_status_bar(struct sbuf *sb) {
   if (len > editor.screen_cols)
     len = editor.screen_cols;
 
-  sbuf_cat(sb, "\x1b[7m");
+  sbuf_cat(sb, INVERT);
   sbuf_bcat(sb, status, len);
 
   while (len < editor.screen_cols) {
@@ -1066,14 +1066,13 @@ static void editor_draw_status_bar(struct sbuf *sb) {
     len++;
   }
 
-  sbuf_cat(sb, "\x1b[m");
-  sbuf_cat(sb, "\r\n");
+  sbuf_cat(sb, RESET_SGR "\r\n");
 }
 
 static void editor_draw_message_bar(struct sbuf *sb) {
   int msg_len = strlen(editor.statusmsg);
 
-  sbuf_cat(sb, "\x1b[K");
+  sbuf_cat(sb, ERASE_IN_LINE(ERASE_TO_END));
 
   if (msg_len > editor.screen_cols)
     msg_len = editor.screen_cols;
@@ -1125,20 +1124,15 @@ static void editor_draw_rows(struct sbuf *sb) {
         if (iscntrl(c[i])) {
           char symbol = (c[i] <= 26) ? '@' + c[i] : '?';
 
-          sbuf_cat(sb, "\x1b[7m");
+          sbuf_cat(sb, INVERT);
           sbuf_bcat(sb, &symbol, 1);
-          sbuf_cat(sb, "\x1b[m");
+          sbuf_cat(sb, RESET_SGR);
 
-          if (current_color != -1) {
-            char color_buf[16];
-            int color_len = snprintf(color_buf, sizeof(color_buf), "\x1b[%dm",
-                                     current_color);
-
-            sbuf_bcat(sb, color_buf, color_len);
-          }
+          if (current_color != -1)
+            sbuf_printf(sb, SGR_FMT, current_color);
         } else if (hl[i] == HL_NORMAL) {
           if (current_color != -1) {
-            sbuf_cat(sb, "\x1b[39m");
+            sbuf_cat(sb, DEFAULT_FG);
             current_color = -1;
           }
           sbuf_bcat(sb, &c[i], 1);
@@ -1148,17 +1142,16 @@ static void editor_draw_rows(struct sbuf *sb) {
             current_color = color;
             char color_buf[16];
             int color_len =
-                snprintf(color_buf, sizeof(color_buf), "\x1b[%dm", color);
+                snprintf(color_buf, sizeof(color_buf), SGR_FMT, color);
             sbuf_bcat(sb, color_buf, color_len);
           }
           sbuf_bcat(sb, &c[i], 1);
         }
       }
-      sbuf_cat(sb, "\x1b[39m");
+      sbuf_cat(sb, DEFAULT_FG);
     }
 
-    sbuf_cat(sb, "\x1b[K");
-    sbuf_cat(sb, "\r\n");
+    sbuf_cat(sb, ERASE_IN_LINE(ERASE_TO_END) "\r\n");
   }
 }
 
