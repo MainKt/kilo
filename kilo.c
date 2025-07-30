@@ -147,12 +147,16 @@ static void editor_draw_status_bar(struct sbuf *sb);
 static void editor_draw_message_bar(struct sbuf *sb);
 static void editor_draw_rows(struct sbuf *sb);
 
+static void enter_alt_buffer(void);
+static void leave_alt_buffer(void);
+
 static void init_editor(void);
 
 int main(int argc, char *argv[]) {
   struct kevent event, tevent;
 
   enable_raw_mode();
+  enter_alt_buffer();
   init_editor();
 
   if (argc > 1)
@@ -182,7 +186,7 @@ int main(int argc, char *argv[]) {
 }
 
 static void die(const char *fmt, ...) {
-  dprintf(STDOUT_FILENO, ERASE_IN_DISPLAY(ERASE_ENTIRE) CURSOR_MOVE(0, 0));
+  leave_alt_buffer();
 
   va_list ap;
   va_start(ap, fmt);
@@ -936,7 +940,7 @@ static void editor_process_keypress(void) {
                                 quit_times--);
       return;
     }
-    dprintf(STDOUT_FILENO, ERASE_IN_DISPLAY(ERASE_ENTIRE) CURSOR_MOVE(0, 0));
+    leave_alt_buffer();
     exit(EXIT_SUCCESS);
     break;
   case CTRL('s'):
@@ -1153,6 +1157,16 @@ static void editor_draw_rows(struct sbuf *sb) {
 
     sbuf_cat(sb, ERASE_IN_LINE(ERASE_TO_END) "\r\n");
   }
+}
+
+static void enter_alt_buffer(void) {
+  if (dprintf(STDOUT_FILENO, ALT_BUF_ON CURSOR_HIDE ERASE_IN_DISPLAY(
+                                 ERASE_ENTIRE) CURSOR_MOVE(1, 1)) < 0)
+    err(EXIT_FAILURE, "dprintf");
+}
+
+static void leave_alt_buffer(void) {
+  dprintf(STDOUT_FILENO, ALT_BUF_OFF CURSOR_SHOW);
 }
 
 static void init_editor(void) {
