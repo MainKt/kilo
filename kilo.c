@@ -8,9 +8,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/event.h>
 #include <sys/ioccom.h>
 #include <sys/param.h>
 #include <sys/queue.h>
+#include <sys/sbuf.h>
 #include <sys/stat.h>
 #include <sys/ttycom.h>
 #include <termios.h>
@@ -100,37 +102,6 @@ enum editor_key {
   PAGE_DOWN
 };
 
-struct append_buffer {
-  char *b;
-  int len;
-};
-
-#define AB_INIT(ab)                                                            \
-  do {                                                                         \
-    struct append_buffer *_AB_ab = (ab);                                       \
-    _AB_ab->b = NULL;                                                          \
-    _AB_ab->len = 0;                                                           \
-  } while (0)
-
-#define AB_APPEND(ab, s, slen)                                                 \
-  do {                                                                         \
-    struct append_buffer *_AB_ab = (ab);                                       \
-    int _AB_slen = slen;                                                       \
-    char *_AB_new = realloc(_AB_ab->b, _AB_ab->len + _AB_slen);                \
-    if (_AB_new == NULL)                                                       \
-      break;                                                                   \
-    memcpy(&_AB_new[_AB_ab->len], s, _AB_slen);                                \
-    _AB_ab->b = _AB_new;                                                       \
-    _AB_ab->len += _AB_slen;                                                   \
-  } while (0)
-
-#define AB_FREE(ab)                                                            \
-  do {                                                                         \
-    struct append_buffer *_AB_ab = (ab);                                       \
-    free(_AB_ab->b);                                                           \
-    _AB_ab->len = 0;                                                           \
-  } while (0)
-
 static void die(const char *);
 static void enable_raw_mode(void);
 static void disable_raw_mode(void);
@@ -169,9 +140,9 @@ static void editor_process_keypress(void);
 static void editor_refresh_screen(void);
 static void editor_set_status_message(const char *, ...);
 static void editor_scroll(void);
-static void editor_draw_status_bar(struct append_buffer *ab);
-static void editor_draw_message_bar(struct append_buffer *ab);
-static void editor_draw_rows(struct append_buffer *ab);
+static void editor_draw_status_bar(struct sbuf *sb);
+static void editor_draw_message_bar(struct sbuf *sb);
+static void editor_draw_rows(struct sbuf *sb);
 
 static void init_editor(void);
 
@@ -179,7 +150,7 @@ int main(int argc, char *argv[]) {
   enable_raw_mode();
   init_editor();
 
-  if (argc >= 2)
+  if (argc > 1)
     editor_open(argv[1]);
 
   editor_set_status_message(
@@ -1001,29 +972,25 @@ static void editor_process_keypress(void) {
 }
 
 static void editor_refresh_screen(void) {
-  struct append_buffer ab;
-  char buf[32];
+  struct sbuf *sb = sbuf_new_auto();
 
   editor_scroll();
 
-  AB_INIT(&ab);
-  AB_APPEND(&ab, "\x1b[?25l", 6);
-  AB_APPEND(&ab, "\x1b[H", 3);
+  sbuf_cat(sb, "\x1b[?25l");
+  sbuf_cat(sb, "\x1b[H");
 
-  editor_draw_rows(&ab);
-  editor_draw_status_bar(&ab);
-  editor_draw_message_bar(&ab);
+  editor_draw_rows(sb);
+  editor_draw_status_bar(sb);
+  editor_draw_message_bar(sb);
 
-  snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
-           editor.cursor_y - editor.row_offset + 1,
-           editor.render_x - editor.col_offset + 1);
-  AB_APPEND(&ab, buf, strlen(buf));
+  sbuf_printf(sb, "\x1b[%d;%dH", editor.cursor_y - editor.row_offset + 1,
+              editor.render_x - editor.col_offset + 1);
 
-  AB_APPEND(&ab, "\x1b[?25h", 6);
+  sbuf_cat(sb, "\x1b[?25h");
 
-  write(STDOUT_FILENO, ab.b, ab.len);
+  write(STDOUT_FILENO, sbuf_data(sb), sbuf_len(sb));
 
-  AB_FREE(&ab);
+  sbuf_delete(sb);
 }
 
 static void editor_set_status_message(const char *fmt, ...) {
@@ -1055,7 +1022,7 @@ static void editor_scroll(void) {
     editor.col_offset = editor.render_x - editor.screen_cols + 1;
 }
 
-static void editor_draw_status_bar(struct append_buffer *ab) {
+static void editor_draw_status_bar(struct sbuf *sb) {
   char status[80], status_right[80];
   int len = snprintf(status, sizeof(status), "%.20s - %d lines %s",
                      editor.file == NULL ? "[No Name]" : editor.file,
@@ -1068,36 +1035,36 @@ static void editor_draw_status_bar(struct append_buffer *ab) {
   if (len > editor.screen_cols)
     len = editor.screen_cols;
 
-  AB_APPEND(ab, "\x1b[7m", 4);
-  AB_APPEND(ab, status, len);
+  sbuf_cat(sb, "\x1b[7m");
+  sbuf_bcat(sb, status, len);
 
   while (len < editor.screen_cols) {
     if (editor.screen_cols - len == rlen) {
-      AB_APPEND(ab, status_right, rlen);
+      sbuf_bcat(sb, status_right, rlen);
       break;
     }
 
-    AB_APPEND(ab, " ", 1);
+    sbuf_cat(sb, " ");
     len++;
   }
 
-  AB_APPEND(ab, "\x1b[m", 3);
-  AB_APPEND(ab, "\r\n", 3);
+  sbuf_cat(sb, "\x1b[m");
+  sbuf_cat(sb, "\r\n");
 }
 
-static void editor_draw_message_bar(struct append_buffer *ab) {
+static void editor_draw_message_bar(struct sbuf *sb) {
   int msg_len = strlen(editor.statusmsg);
 
-  AB_APPEND(ab, "\x1b[K", 3);
+  sbuf_cat(sb, "\x1b[K");
 
   if (msg_len > editor.screen_cols)
     msg_len = editor.screen_cols;
 
   if (msg_len != 0 && time(NULL) - editor.statusmsg_time < 5)
-    AB_APPEND(ab, editor.statusmsg, msg_len);
+    sbuf_bcat(sb, editor.statusmsg, msg_len);
 }
 
-static void editor_draw_rows(struct append_buffer *ab) {
+static void editor_draw_rows(struct sbuf *sb) {
   for (int y = 0; y < editor.screen_rows; y++) {
     int file_row = y + editor.row_offset;
     if (file_row >= editor.num_rows) {
@@ -1112,16 +1079,16 @@ static void editor_draw_rows(struct append_buffer *ab) {
 
         padding = (editor.screen_cols - welcome_len) / 2;
         if (padding != 0) {
-          AB_APPEND(ab, "~", 1);
+          sbuf_cat(sb, "~");
           padding--;
         }
 
         while ((padding--) != 0)
-          AB_APPEND(ab, " ", 1);
+          sbuf_cat(sb, " ");
 
-        AB_APPEND(ab, welcome, welcome_len);
+        sbuf_bcat(sb, welcome, welcome_len);
       } else
-        AB_APPEND(ab, "~", 1);
+        sbuf_cat(sb, "~");
     } else {
       int len = editor.rows[file_row].render_size - editor.col_offset;
       char *c;
@@ -1140,23 +1107,23 @@ static void editor_draw_rows(struct append_buffer *ab) {
         if (iscntrl(c[i])) {
           char symbol = (c[i] <= 26) ? '@' + c[i] : '?';
 
-          AB_APPEND(ab, "\x1b[7m", 4);
-          AB_APPEND(ab, &symbol, 1);
-          AB_APPEND(ab, "\x1b[m", 3);
+          sbuf_cat(sb, "\x1b[7m");
+          sbuf_bcat(sb, &symbol, 1);
+          sbuf_cat(sb, "\x1b[m");
 
           if (current_color != -1) {
             char color_buf[16];
             int color_len = snprintf(color_buf, sizeof(color_buf), "\x1b[%dm",
                                      current_color);
 
-            AB_APPEND(ab, color_buf, color_len);
+            sbuf_bcat(sb, color_buf, color_len);
           }
         } else if (hl[i] == HL_NORMAL) {
           if (current_color != -1) {
-            AB_APPEND(ab, "\x1b[39m", 5);
+            sbuf_cat(sb, "\x1b[39m");
             current_color = -1;
           }
-          AB_APPEND(ab, &c[i], 1);
+          sbuf_bcat(sb, &c[i], 1);
         } else {
           int color = editor_syntax_to_color(hl[i]);
           if (current_color != color) {
@@ -1164,16 +1131,16 @@ static void editor_draw_rows(struct append_buffer *ab) {
             char color_buf[16];
             int color_len =
                 snprintf(color_buf, sizeof(color_buf), "\x1b[%dm", color);
-            AB_APPEND(ab, color_buf, color_len);
+            sbuf_bcat(sb, color_buf, color_len);
           }
-          AB_APPEND(ab, &c[i], 1);
+          sbuf_bcat(sb, &c[i], 1);
         }
       }
-      AB_APPEND(ab, "\x1b[39m", 5);
+      sbuf_cat(sb, "\x1b[39m");
     }
 
-    AB_APPEND(ab, "\x1b[K", 3);
-    AB_APPEND(ab, "\r\n", 2);
+    sbuf_cat(sb, "\x1b[K");
+    sbuf_cat(sb, "\r\n");
   }
 }
 
