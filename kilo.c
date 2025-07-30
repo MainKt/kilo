@@ -54,6 +54,7 @@ struct editor_row {
 };
 
 struct editor_config {
+  int kq;
   int cursor_x, cursor_y;
   int render_x;
   int row_offset, col_offset;
@@ -102,7 +103,7 @@ enum editor_key {
   PAGE_DOWN
 };
 
-static void die(const char *);
+static void die(const char *, ...);
 static void enable_raw_mode(void);
 static void disable_raw_mode(void);
 static int editor_read_key(void);
@@ -147,6 +148,8 @@ static void editor_draw_rows(struct sbuf *sb);
 static void init_editor(void);
 
 int main(int argc, char *argv[]) {
+  struct kevent event, tevent;
+
   enable_raw_mode();
   init_editor();
 
@@ -156,23 +159,39 @@ int main(int argc, char *argv[]) {
   editor_set_status_message(
       "HELP: CTRL-S = save | CTRL-Q = quit | CTRL-F = find");
 
+  EV_SET(&event, STDIN_FILENO, EVFILT_READ, EV_ADD, 0, 0, NULL);
+  if (kevent(editor.kq, &event, 1, NULL, 0, NULL) == -1)
+    err(EXIT_FAILURE, "kevent register");
+
   for (;;) {
+    int nev;
+
     editor_refresh_screen();
+
+    if ((nev = kevent(editor.kq, NULL, 0, &tevent, 1, NULL)) == -1)
+      die("kevent wait");
+    else if (nev > 0 && tevent.flags & EV_ERROR)
+      die("event error: %s", strerror(tevent.data));
+
     editor_process_keypress();
   }
 
   return (0);
 }
 
-static void die(const char *s) {
+static void die(const char *fmt, ...) {
   write(STDOUT_FILENO, "\x1b[2J", 4);
   write(STDOUT_FILENO, "\x1b[H", 4);
 
-  perror(s);
-  exit(EXIT_FAILURE);
+  va_list ap;
+  va_start(ap, fmt);
+  verr(EXIT_FAILURE, fmt, ap);
+  va_end(ap);
 }
 
 static void disable_raw_mode(void) {
+  close(editor.kq);
+
   if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &editor.orignal_termios) == -1)
     die("tcsetattr");
 }
@@ -190,8 +209,7 @@ static void enable_raw_mode(void) {
   raw.c_oflag &= ~(OPOST);
   raw.c_cflag |= CS8;
   raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
-  raw.c_cc[VMIN] = 0;
-  raw.c_cc[VTIME] = 1;
+  raw.c_cc[VMIN] = raw.c_cc[VTIME] = 0;
 
   if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1)
     die("tcsetattr");
@@ -1145,6 +1163,7 @@ static void editor_draw_rows(struct sbuf *sb) {
 }
 
 static void init_editor(void) {
+  editor.kq = -1;
   editor.cursor_x = editor.cursor_y = 0;
   editor.render_x = 0;
   editor.row_offset = editor.col_offset = 0;
@@ -1155,6 +1174,9 @@ static void init_editor(void) {
   editor.statusmsg[0] = '\0';
   editor.statusmsg_time = 0;
   editor.syntax = NULL;
+
+  if ((editor.kq = kqueue()) == -1)
+    err(EXIT_FAILURE, "kqueue() failed");
 
   if (get_window_size(&editor.screen_rows, &editor.screen_cols) == -1)
     die("get_window_size");
