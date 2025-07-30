@@ -56,7 +56,7 @@ struct editor_row {
 };
 
 struct editor_config {
-  int kq;
+  int tty, kq;
   int cursor_x, cursor_y;
   int render_x;
   int row_offset, col_offset;
@@ -155,6 +155,9 @@ static void init_editor(void);
 int main(int argc, char *argv[]) {
   struct kevent event, tevent;
 
+  if (!isatty(STDIN_FILENO))
+    errx(EXIT_FAILURE, "not a TTY");
+
   enable_raw_mode();
   enter_alt_buffer();
   init_editor();
@@ -165,7 +168,7 @@ int main(int argc, char *argv[]) {
   editor_set_status_message(
       "HELP: CTRL-S = save | CTRL-Q = quit | CTRL-F = find");
 
-  EV_SET(&event, STDIN_FILENO, EVFILT_READ, EV_ADD, 0, 0, NULL);
+  EV_SET(&event, editor.tty, EVFILT_READ, EV_ADD, 0, 0, NULL);
   if (kevent(editor.kq, &event, 1, NULL, 0, NULL) == -1)
     err(EXIT_FAILURE, "kevent register");
 
@@ -195,16 +198,17 @@ static void die(const char *fmt, ...) {
 }
 
 static void disable_raw_mode(void) {
-  close(editor.kq);
-
-  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &editor.orignal_termios) == -1)
+  if (tcsetattr(editor.tty, TCSAFLUSH, &editor.orignal_termios) == -1)
     die("tcsetattr");
+
+  close(editor.tty);
+  close(editor.kq);
 }
 
 static void enable_raw_mode(void) {
   struct termios raw;
 
-  if (tcgetattr(STDIN_FILENO, &editor.orignal_termios) == -1)
+  if (tcgetattr(editor.tty, &editor.orignal_termios) == -1)
     die("tcgetattr");
 
   atexit(disable_raw_mode);
@@ -216,7 +220,7 @@ static void enable_raw_mode(void) {
   raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
   raw.c_cc[VMIN] = raw.c_cc[VTIME] = 0;
 
-  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1)
+  if (tcsetattr(editor.tty, TCSAFLUSH, &raw) == -1)
     die("tcsetattr");
 }
 
@@ -224,7 +228,7 @@ static int editor_read_key(void) {
   int nread;
   char c;
 
-  while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+  while ((nread = read(editor.tty, &c, 1)) != 1) {
     if (nread == -1 && errno != EAGAIN)
       die("read");
   }
@@ -232,14 +236,14 @@ static int editor_read_key(void) {
   if (c == ESC_CHAR) {
     char seq[3];
 
-    if (read(STDIN_FILENO, &seq[0], 1) != 1)
+    if (read(editor.tty, &seq[0], 1) != 1)
       return (ESC_CHAR);
-    if (read(STDIN_FILENO, &seq[1], 1) != 1)
+    if (read(editor.tty, &seq[1], 1) != 1)
       return (ESC_CHAR);
 
     if (seq[0] == '[') {
       if (seq[1] >= '0' && seq[1] <= '9') {
-        if (read(STDIN_FILENO, &seq[2], 1) != 1)
+        if (read(editor.tty, &seq[2], 1) != 1)
           return (ESC_CHAR);
 
         if (seq[2] == '~') {
@@ -294,11 +298,11 @@ static int editor_read_key(void) {
 static int get_cursor_position(int *rows, int *cols) {
   char buf[32] = "";
 
-  if (dprintf(STDOUT_FILENO, CURSOR_POS) < 0)
+  if (dprintf(editor.tty, CURSOR_POS) < 0)
     return (-1);
 
   for (size_t i = 0; i < sizeof(buf) - 1; i++) {
-    if (read(STDIN_FILENO, &buf[i], 1) != 1 || buf[i] == 'R')
+    if (read(editor.tty, &buf[i], 1) != 1 || buf[i] == 'R')
       break;
   }
 
@@ -312,8 +316,8 @@ static int get_cursor_position(int *rows, int *cols) {
 static int get_window_size(int *rows, int *cols) {
   struct winsize ws;
 
-  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
-    if (dprintf(STDOUT_FILENO, CURSOR_FORWARD(999) CURSOR_DOWN(999)) < 0)
+  if (ioctl(editor.tty, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
+    if (dprintf(editor.tty, CURSOR_FORWARD(999) CURSOR_DOWN(999)) < 0)
       return (-1);
     return (get_cursor_position(rows, cols));
   }
@@ -1010,7 +1014,8 @@ static void editor_refresh_screen(void) {
 
   sbuf_cat(sb, CURSOR_SHOW);
 
-  write(STDOUT_FILENO, sbuf_data(sb), sbuf_len(sb));
+  if (write(editor.tty, sbuf_data(sb), sbuf_len(sb)) != sbuf_len(sb))
+    die("write");
 
   sbuf_delete(sb);
 }
@@ -1160,17 +1165,17 @@ static void editor_draw_rows(struct sbuf *sb) {
 }
 
 static void enter_alt_buffer(void) {
-  if (dprintf(STDOUT_FILENO, ALT_BUF_ON CURSOR_HIDE ERASE_IN_DISPLAY(
-                                 ERASE_ENTIRE) CURSOR_MOVE(1, 1)) < 0)
+  if (dprintf(editor.tty, ALT_BUF_ON CURSOR_HIDE ERASE_IN_DISPLAY(ERASE_ENTIRE)
+                              CURSOR_MOVE(1, 1)) < 0)
     err(EXIT_FAILURE, "dprintf");
 }
 
 static void leave_alt_buffer(void) {
-  dprintf(STDOUT_FILENO, ALT_BUF_OFF CURSOR_SHOW);
+  dprintf(editor.tty, ALT_BUF_OFF CURSOR_SHOW);
 }
 
 static void init_editor(void) {
-  editor.kq = -1;
+  editor.tty = editor.kq = -1;
   editor.cursor_x = editor.cursor_y = 0;
   editor.render_x = 0;
   editor.row_offset = editor.col_offset = 0;
@@ -1181,6 +1186,9 @@ static void init_editor(void) {
   editor.statusmsg[0] = '\0';
   editor.statusmsg_time = 0;
   editor.syntax = NULL;
+
+  if ((editor.tty = open("/dev/tty", O_RDWR)) == -1)
+    err(EXIT_FAILURE, "open(/dev/tty)");
 
   if ((editor.kq = kqueue()) == -1)
     err(EXIT_FAILURE, "kqueue() failed");
